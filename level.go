@@ -11,7 +11,7 @@ import (
 
 	"github.com/SolarLune/dngn"
 	"github.com/SolarLune/paths"
-	"github.com/SolarLune/resolv/resolv"
+	"github.com/SolarLune/resolv"
 	"github.com/hajimehoshi/ebiten"
 )
 
@@ -28,17 +28,19 @@ type Level struct {
 	MapImageBG                   *ebiten.Image
 	MapImageFG                   *ebiten.Image
 	Space                        *resolv.Space
-	DebugMode                    bool
 	CameraOffsetX, CameraOffsetY float64
 }
 
 func NewLevel(game *Game) *Level {
 
+	cellW := 16
+	cellH := 16
+
 	level := &Level{
 		Game:        game,
 		Map:         dngn.NewRoom(60, 60),
 		GameObjects: []*GameObject{},
-		Space:       resolv.NewSpace(),
+		Space:       resolv.NewSpace(60, 60, cellW, cellH),
 	}
 
 	level.MapImageBG, _ = ebiten.NewImage(level.Map.Width*16, level.Map.Height*16, ebiten.FilterNearest)
@@ -62,34 +64,23 @@ func (level *Level) Init() {
 
 	// Spawn objects
 
-	player := NewGameObject(level)
-
-	spawnPoint := level.Map.Select().ByRune(FLOOR).ByPercentage(0.1).Cells[0]
-
-	player.Add(
-		NewBodyComponent(float64(spawnPoint[0]*16), float64(spawnPoint[1]*16), 8, 12),
-		NewDrawComponent(),
-		NewDepthSortComponent(true),
-		NewAnimationComponent("assets/npc.json"),
-		NewPlayerControlComponent(),
-		NewCameraFollowComponent(),
-	)
-
+	player := NewPlayer(level)
 	level.Add(player)
 
-	npc := NewGameObject(level)
-
-	npc.Add(
-		NewBodyComponent(float64(spawnPoint[0]*16), float64(spawnPoint[1]*16), 8, 12),
-		NewDrawComponent(),
-		NewAnimationComponent("assets/npc.json"),
-		NewDepthSortComponent(true),
-		NewAIControlComponent(),
-	)
-
+	npc := NewNPC(level)
 	level.Add(npc)
 
-	level.SimplifyLevelGeometry()
+	pb := player.GetComponent(TypeBodyComponent).(*BodyComponent)
+	npcBody := npc.GetComponent(TypeBodyComponent).(*BodyComponent)
+	npcBody.Object.X = pb.Object.X
+	npcBody.Object.Y = pb.Object.Y
+
+	for _, ci := range level.Map.Select().ByRune(WALL).Cells {
+		cx := float64(ci[0] * 16)
+		cy := float64(ci[1] * 16)
+		obj := resolv.NewObject(cx, cy, 16, 16, level.Space)
+		obj.AddTag("solid")
+	}
 
 	level.RenderTiles()
 
@@ -109,9 +100,9 @@ func (level *Level) Update(screen *ebiten.Image) {
 	// Sort game objects by depth if they've got the component
 	sort.Slice(level.GameObjects, func(i, j int) bool {
 
-		if da := level.GameObjects[i].Get(TypeDepthSortComponent); da != nil {
+		if da := level.GameObjects[i].GetComponent(TypeDepthSortComponent); da != nil {
 
-			if db := level.GameObjects[j].Get(TypeDepthSortComponent); db != nil {
+			if db := level.GameObjects[j].GetComponent(TypeDepthSortComponent); db != nil {
 
 				depthA := da.(*DepthSortComponent).Depth
 				depthB := db.(*DepthSortComponent).Depth
@@ -134,6 +125,8 @@ func (level *Level) Update(screen *ebiten.Image) {
 
 		for i, g := range level.GameObjects {
 
+			g.OnRemove()
+
 			if g == gameObject {
 				level.GameObjects = append(level.GameObjects[:i], level.GameObjects[i+1:]...)
 			}
@@ -146,89 +139,37 @@ func (level *Level) Update(screen *ebiten.Image) {
 
 	if level.Game.DebugMode {
 
-		for _, shape := range *level.Space {
+		for y := 0; y < level.Space.Height(); y++ {
 
-			rect, isRect := shape.(*resolv.Rectangle)
+			for x := 0; x < level.Space.Width(); x++ {
 
-			if isRect {
+				cell := level.Space.Cell(x, y)
 
-				x, y := float64(rect.X)-level.CameraOffsetX, float64(rect.Y)-level.CameraOffsetY
-				w, h := float64(rect.W), float64(rect.H)
+				cw := float64(level.Space.CellWidth)
+				ch := float64(level.Space.CellHeight)
+				cx := float64(cell.X) * cw
+				cy := float64(cell.Y) * ch
 
-				red := color.RGBA{255, 0, 0, 192}
-				ebitenutil.DrawLine(screen, x, y, x+w, y, red)
-				ebitenutil.DrawLine(screen, x+w, y, x+w, y+h, red)
-				ebitenutil.DrawLine(screen, x+w, y+h, x, y+h, red)
-				ebitenutil.DrawLine(screen, x, y+h, x, y, red)
-				// ebitenutil.DrawRect(screen, float64(rect.X)-level.CameraOffsetX, float64(rect.Y)-level.CameraOffsetY, float64(rect.W), float64(rect.H), color.RGBA{uintX, uintY, 0, 128})
+				drawColor := color.RGBA{20, 20, 20, 255}
 
+				if cell.Occupied() {
+					drawColor = color.RGBA{255, 255, 0, 255}
+				}
+
+				camX := level.CameraOffsetX
+				camY := level.CameraOffsetY
+
+				ebitenutil.DrawLine(screen, cx-camX, cy-camY, cx-camX+cw, cy-camY, drawColor)
+
+				ebitenutil.DrawLine(screen, cx+cw-camX, cy-camY, cx-camX+cw, cy+ch-camY, drawColor)
+
+				ebitenutil.DrawLine(screen, cx+cw-camX, cy+ch-camY, cx-camX, cy+ch-camY, drawColor)
+
+				ebitenutil.DrawLine(screen, cx-camX, cy+ch-camY, cx-camX, cy-camY, drawColor)
 			}
 
 		}
 
-	}
-
-}
-
-func (level *Level) SimplifyLevelGeometry() {
-
-	// Consolidation of level Rects
-
-	rects := [][]*resolv.Rectangle{}
-
-	for y := 0; y < level.Map.Height; y++ {
-		rects = append(rects, []*resolv.Rectangle{})
-		for x := 0; x < level.Map.Width; x++ {
-			rects[y] = append(rects[y], nil)
-		}
-	}
-
-	getRect := func(x, y int) *resolv.Rectangle {
-		if y >= 0 && y < len(rects) && x >= 0 && x < len(rects[y]) {
-			return rects[y][x]
-		}
-		return nil
-	}
-
-	for _, cell := range level.Map.Select().ByRune(WALL).Cells {
-
-		cx, cy := cell[0], cell[1]
-		r := resolv.NewRectangle(int32(cx*16), int32(cy*16), 16, 16)
-		rects[cy][cx] = r
-		r.AddTags("solid")
-		level.Space.Add(r)
-
-	}
-
-	for y := 0; y < len(rects); y++ {
-
-		for x := 0; x < len(rects[y]); x++ {
-
-			left := getRect(x-1, y)
-			this := getRect(x, y)
-			if this != left && this != nil && left != nil {
-				level.Space.Remove(this)
-				left.W += 16
-				rects[y][x] = left
-			}
-
-		}
-
-	}
-
-	for y := 0; y < len(rects); y++ {
-		for x := 0; x < len(rects[y]); x++ {
-
-			above := getRect(x, y-1)
-			this := getRect(x, y)
-
-			if this != above && this != nil && above != nil && above.X == this.X && above.W == this.W && level.Space.Contains(this) {
-				level.Space.Remove(this)
-				above.H += 16
-				rects[y][x] = above
-			}
-
-		}
 	}
 
 }
@@ -392,7 +333,7 @@ func (level *Level) GetGameObjectByComponent(componentTypeConstant int) []*GameO
 	goList := []*GameObject{}
 
 	for _, g := range level.GameObjects {
-		if g.Get(componentTypeConstant) != nil {
+		if g.GetComponent(componentTypeConstant) != nil {
 			goList = append(goList, g)
 		}
 	}

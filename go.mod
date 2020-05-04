@@ -8,8 +8,11 @@ require (
 	github.com/SolarLune/paths v0.0.0-20190106103957-acfca40d365f
 	github.com/SolarLune/resolv v0.0.0-20190821203317-2f6176d8d107
 	github.com/hajimehoshi/ebiten v1.11.0
-	github.com/kvartborg/vector v0.0.0-20200416075651-23044b1baa9a
+	github.com/kvartborg/vector v0.0.0-20200419093813-2cba0cabb4f0
 	github.com/tidwall/gjson v1.6.0 // indirect
 )
 
 replace github.com/SolarLune/paths v0.0.0-20190106103957-acfca40d365f => ../paths
+replace github.com/SolarLune/resolv v0.0.0-20190821203317-2f6176d8d107 => ../resolv
+replace github.com/kvartborg/vector v0.0.0-20200419093813-2cba0cabb4f0 => ../vector
+replace github.com/SolarLune/goaseprite v0.0.0-20190529165257-8ddb57cec83c => ../goaseprite

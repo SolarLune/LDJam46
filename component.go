@@ -2,14 +2,17 @@ package main
 
 import (
 	"image"
+	"image/color"
 	"math"
 	"path/filepath"
 
 	"github.com/SolarLune/goaseprite"
 	"github.com/SolarLune/paths"
-	"github.com/SolarLune/resolv/resolv"
+	"github.com/SolarLune/resolv"
 
 	"github.com/hajimehoshi/ebiten"
+	"github.com/hajimehoshi/ebiten/ebitenutil"
+	"github.com/hajimehoshi/ebiten/inpututil"
 	"github.com/kvartborg/vector"
 )
 
@@ -28,17 +31,20 @@ const (
 	TypeAIControlComponent
 	TypeCameraFollowComponent
 	TypeDepthSortComponent
+	TypeWeaponComponent
+	TypeEndOnCollisionComponent
 )
-
-//
 
 type DrawComponent struct {
 	GameObject     *GameObject
 	FlipHorizontal bool
+	Rotation       float64
+	Offset         vector.Vector
+	Visible        bool
 }
 
-func NewDrawComponent() *DrawComponent {
-	return &DrawComponent{}
+func NewDrawComponent(offsetX, offsetY float64) *DrawComponent {
+	return &DrawComponent{Offset: vector.Vector{offsetX, offsetY}, Visible: true}
 }
 
 func (d *DrawComponent) OnAdd(g *GameObject) {
@@ -49,28 +55,33 @@ func (d *DrawComponent) OnRemove(g *GameObject) {}
 
 func (d *DrawComponent) Update(screen *ebiten.Image) {
 
-	if d.GameObject.Get(TypeAnimationComponent) != nil {
+	if d.Visible && d.GameObject.GetComponent(TypeAnimationComponent) != nil {
 
 		geoM := ebiten.GeoM{}
+		anim := d.GameObject.GetComponent(TypeAnimationComponent).(*AnimationComponent)
+		bodyX := d.Offset[0]
+		bodyY := d.Offset[1]
+		x, y := anim.Ase.GetFrameXY()
+		img := anim.Image.SubImage(image.Rect(int(x), int(y), int(x+anim.Ase.FrameWidth), int(y+anim.Ase.FrameHeight))).(*ebiten.Image)
+		srcW, srcH := img.Size()
+
+		if d.GameObject.GetComponent(TypeBodyComponent) != nil {
+			body := d.GameObject.GetComponent(TypeBodyComponent).(*BodyComponent)
+			bodyX += body.Object.X - ((float64(srcW) - body.Object.W) / 2)
+			bodyY += body.Object.Y - ((float64(srcH) - body.Object.H) / 2)
+		}
+
+		if d.Rotation != 0 {
+
+			geoM.Translate(-float64(anim.Ase.FrameWidth/2), -float64(anim.Ase.FrameHeight/2))
+			geoM.Rotate(d.Rotation)
+			geoM.Translate(float64(anim.Ase.FrameWidth/2), float64(anim.Ase.FrameHeight/2))
+
+		}
+
 		colorM := ebiten.ColorM{}
 
 		colorM.ChangeHSV(0, 1, 0)
-
-		bodyX := float64(0)
-		bodyY := float64(0)
-
-		anim := d.GameObject.Get(TypeAnimationComponent).(*AnimationComponent)
-		x, y := anim.Ase.GetFrameXY()
-
-		img := anim.Image.SubImage(image.Rect(int(x), int(y), int(x+anim.Ase.FrameWidth), int(y+anim.Ase.FrameHeight))).(*ebiten.Image)
-
-		srcW, srcH := img.Size()
-
-		if d.GameObject.Get(TypeBodyComponent) != nil {
-			body := d.GameObject.Get(TypeBodyComponent).(*BodyComponent)
-			bodyX = body.Position[0] - ((float64(srcW) - body.Size[0]) / 2)
-			bodyY = body.Position[1] - ((float64(srcH) - body.Size[1]) / 2)
-		}
 
 		if d.FlipHorizontal {
 
@@ -92,10 +103,13 @@ func (d *DrawComponent) Type() int { return TypeDrawComponent }
 
 //
 
+//
+
 type AnimationComponent struct {
-	AnimPath string
-	Image    *ebiten.Image
-	Ase      *goaseprite.File
+	AnimPath  string
+	Image     *ebiten.Image
+	Ase       *goaseprite.File
+	OnAnimEnd func(*AnimationComponent)
 }
 
 func NewAnimationComponent(animPath string) *AnimationComponent {
@@ -109,7 +123,15 @@ func (a *AnimationComponent) OnAdd(g *GameObject) {}
 
 func (a *AnimationComponent) OnRemove(g *GameObject) {}
 
-func (a *AnimationComponent) Update(screen *ebiten.Image) { a.Ase.Update(1.0 / 60.0) }
+func (a *AnimationComponent) Update(screen *ebiten.Image) {
+
+	a.Ase.Update(1.0 / 60.0)
+
+	if a.Ase.FinishedAnimation && a.OnAnimEnd != nil {
+		a.OnAnimEnd(a)
+	}
+
+}
 
 func (a *AnimationComponent) Type() int { return TypeAnimationComponent }
 
@@ -117,59 +139,70 @@ func (a *AnimationComponent) Type() int { return TypeAnimationComponent }
 
 type BodyComponent struct {
 	GameObject *GameObject
-	Position   vector.Vector
-	Size       vector.Vector
 	Speed      vector.Vector
-	Shape      *resolv.Rectangle
+	Object     *resolv.Object
+	OnBump     func(*BodyComponent)
 }
 
-func NewBodyComponent(x, y, w, h float64) *BodyComponent {
+func NewBodyComponent(x, y, w, h float64, space *resolv.Space) *BodyComponent {
 
 	return &BodyComponent{
-		Position: vector.Vector{x, y},
-		Size:     vector.Vector{w, h},
-		Speed:    vector.Vector{0, 0},
-		Shape:    resolv.NewRectangle(0, 0, 0, 0),
+		Speed:  vector.Vector{0, 0},
+		Object: resolv.NewObject(x, y, w, h, space),
 	}
 
 }
 
 func (b *BodyComponent) OnAdd(g *GameObject) {
 	b.GameObject = g
-	g.Level.Space.Add(b.Shape)
 }
 
-func (b *BodyComponent) OnRemove(g *GameObject) { g.Level.Space.Remove(b.Shape) }
+func (b *BodyComponent) OnRemove(g *GameObject) { b.Object.Remove() }
 
 func (b *BodyComponent) Update(screen *ebiten.Image) {
 
-	solids := b.GameObject.Level.Space.FilterByTags("solid")
-
-	roundUp := func(value float64) int32 {
-		if value < 0 {
-			return int32(math.Floor(value))
-		} else {
-			return int32(math.Ceil(value))
+	if col := b.Object.Check(b.Speed[0], 0, "solid"); col.Valid() {
+		if b.OnBump != nil {
+			b.OnBump(b)
 		}
+		b.Object.X += float64(col.ContactX)
+		if col.CanSlide && math.Abs(col.SlideY) < 4 {
+			b.Object.Y += col.SlideY
+		} else {
+			b.Speed[0] = 0
+		}
+	} else {
+		b.Object.X += b.Speed[0]
 	}
 
-	b.Shape.X = int32(math.Round(b.Position[0]))
-	b.Shape.Y = int32(math.Round(b.Position[1]))
-	b.Shape.W = int32(math.Round(b.Size[0]))
-	b.Shape.H = int32(math.Round(b.Size[1]))
-
-	if res := solids.Resolve(b.Shape, roundUp(b.Speed[0]), 0); res.Colliding() {
-		b.Position[0] += float64(res.ResolveX)
-		b.Speed[0] = 0
+	if col := b.Object.Check(0, b.Speed[1], "solid"); col.Valid() {
+		if b.OnBump != nil {
+			b.OnBump(b)
+		}
+		b.Object.Y += float64(col.ContactY)
+		if col.CanSlide && math.Abs(col.SlideX) < 4 {
+			b.Object.X += col.SlideX
+		} else {
+			b.Speed[1] = 0
+		}
 	} else {
-		b.Position[0] += b.Speed[0]
+		b.Object.Y += b.Speed[1]
 	}
 
-	if res := solids.Resolve(b.Shape, 0, roundUp(b.Speed[1])); res.Colliding() {
-		b.Position[1] += float64(res.ResolveY)
-		b.Speed[1] = 0
-	} else {
-		b.Position[1] += b.Speed[1]
+	b.Object.Update()
+
+	if b.GameObject.Level.Game.DebugMode {
+
+		x, y := b.Object.X-b.GameObject.Level.CameraOffsetX, b.Object.Y-b.GameObject.Level.CameraOffsetY
+		w, h := b.Object.W, b.Object.H
+
+		red := color.RGBA{255, 0, 0, 192}
+		ebitenutil.DrawLine(screen, x, y, x+w, y, red)
+		ebitenutil.DrawLine(screen, x+w, y, x+w, y+h, red)
+		ebitenutil.DrawLine(screen, x+w, y+h, x, y+h, red)
+		ebitenutil.DrawLine(screen, x, y+h, x, y, red)
+		// ebitenutil.DrawRect(screen, float64(rect.X)-level.CameraOffsetX, float64(rect.Y)-level.CameraOffsetY, float64(rect.W), float64(rect.H), color.RGBA{uintX, uintY, 0, 128})
+
 	}
 
 }
@@ -178,8 +211,8 @@ func (b *BodyComponent) Type() int { return TypeBodyComponent }
 
 func (b *BodyComponent) Center() vector.Vector {
 	return vector.Vector{
-		b.Position[0] + (b.Size[0] / 2),
-		b.Position[1] + (b.Size[1] / 2),
+		b.Object.X + (b.Object.W / 2),
+		b.Object.Y + (b.Object.H / 2),
 	}
 }
 
@@ -202,7 +235,7 @@ func (pc *PlayerControlComponent) OnRemove(g *GameObject) {}
 
 func (pc *PlayerControlComponent) Update(screen *ebiten.Image) {
 
-	b := pc.GameObject.Get(TypeBodyComponent)
+	b := pc.GameObject.GetComponent(TypeBodyComponent)
 
 	if b != nil {
 
@@ -228,6 +261,14 @@ func (pc *PlayerControlComponent) Update(screen *ebiten.Image) {
 			moveDir[1]++
 		}
 
+		if inpututil.IsKeyJustPressed(ebiten.KeyX) {
+			if wc := pc.GameObject.GetComponent(TypeWeaponComponent); wc != nil {
+				weapon := wc.(*WeaponComponent)
+				weapon.FireDirection = pc.Facing.Clone()
+				weapon.Fire()
+			}
+		}
+
 		if body.Speed.Magnitude() < friction {
 			body.Speed[0] = 0
 			body.Speed[1] = 0
@@ -248,7 +289,7 @@ func (pc *PlayerControlComponent) Update(screen *ebiten.Image) {
 
 		}
 
-		a := pc.GameObject.Get(TypeAnimationComponent)
+		a := pc.GameObject.GetComponent(TypeAnimationComponent)
 
 		if a != nil {
 
@@ -290,7 +331,7 @@ func (pc *PlayerControlComponent) Update(screen *ebiten.Image) {
 				anim.Ase.PlaySpeed = 1
 			}
 
-			d := pc.GameObject.Get(TypeDrawComponent)
+			d := pc.GameObject.GetComponent(TypeDrawComponent)
 
 			if d != nil {
 
@@ -310,9 +351,7 @@ func (pc *PlayerControlComponent) Update(screen *ebiten.Image) {
 
 }
 
-func (pc *PlayerControlComponent) Type() int {
-	return TypePlayerControlComponent
-}
+func (pc *PlayerControlComponent) Type() int { return TypePlayerControlComponent }
 
 //
 
@@ -336,16 +375,16 @@ func (cf *CameraFollowComponent) OnRemove(g *GameObject) {}
 
 func (cf *CameraFollowComponent) Update(screen *ebiten.Image) {
 
-	b := cf.GameObject.Get(TypeBodyComponent)
+	b := cf.GameObject.GetComponent(TypeBodyComponent)
 
 	if b != nil {
 
 		body := b.(*BodyComponent)
 
-		tx := body.Position[0] - cf.OffsetX - cf.GameObject.Level.CameraOffsetX
+		tx := body.Object.X - cf.OffsetX - cf.GameObject.Level.CameraOffsetX
 		cf.GameObject.Level.CameraOffsetX += tx * cf.Softness
 
-		ty := body.Position[1] - cf.OffsetY - cf.GameObject.Level.CameraOffsetY
+		ty := body.Object.Y - cf.OffsetY - cf.GameObject.Level.CameraOffsetY
 		cf.GameObject.Level.CameraOffsetY += ty * cf.Softness
 
 		if cf.GameObject.Level.CameraOffsetX < 0 {
@@ -365,9 +404,8 @@ func (cf *CameraFollowComponent) Update(screen *ebiten.Image) {
 
 	}
 
-	// cf.Level.CameraOffsetX =
-
 }
+
 func (cf *CameraFollowComponent) Type() int { return TypeCameraFollowComponent }
 
 //
@@ -377,7 +415,6 @@ type AIControlComponent struct {
 	Facing                 vector.Vector
 	TargetPos              vector.Vector
 	Path                   *paths.Path
-	RayTest                *resolv.Line
 	PathRecalculationTimer int
 }
 
@@ -385,7 +422,6 @@ func NewAIControlComponent() *AIControlComponent {
 	return &AIControlComponent{
 		Facing:    vector.Vector{0, 1},
 		TargetPos: vector.Vector{0, 0},
-		RayTest:   resolv.NewLine(0, 0, 0, 0),
 	}
 }
 
@@ -395,95 +431,38 @@ func (ai *AIControlComponent) OnRemove(g *GameObject) {}
 
 func (ai *AIControlComponent) Update(screen *ebiten.Image) {
 
-	b := ai.GameObject.Get(TypeBodyComponent)
-
-	grid := ai.GameObject.Level.PathfindingGrid
-
-	if b != nil {
+	if b := ai.GameObject.GetComponent(TypeBodyComponent); b != nil {
 
 		body := b.(*BodyComponent)
-		bodyPosition := body.Center()
+		bodyCenterX, bodyCenterY := body.Object.Center()
+		bodyPosition := vector.Vector{bodyCenterX, bodyCenterY}
 
 		if ai.PathRecalculationTimer >= 30 {
 			ai.PathRecalculationTimer = 0
-			ai.Path = nil
+			ai.RecalculatePath()
 		}
 		ai.PathRecalculationTimer++
 
 		if ai.Path != nil {
 
 			targetCell := ai.Path.Next()
-			if targetCell == nil {
-				targetCell = ai.Path.Current()
+
+			// DEBUG
+			if ai.GameObject.Level.Game.DebugMode {
+
+				for _, cell := range ai.Path.Cells {
+
+					cx := float64(cell.X * 16)
+					cy := float64(cell.Y * 16)
+					cellColor := color.RGBA{0, 255, 0, 192}
+					if ai.Path.Current() == cell {
+						cellColor = color.RGBA{0, 0, 255, 192}
+					}
+					ebitenutil.DrawRect(screen, cx-ai.GameObject.Level.CameraOffsetX, cy-ai.GameObject.Level.CameraOffsetY, 16, 16, cellColor)
+
+				}
+
 			}
-
-			// solids := ai.GameObject.Level.Space.FilterByTags("solid")
-
-			// cancelPotential := false
-
-			// for i := ai.Path.CurrentIndex; i < ai.Path.Length(); i++ {
-
-			// 	potential := ai.Path.Get(i)
-
-			// 	px, py := grid.GridToWorld(potential.X, potential.Y)
-			// 	px += float64(grid.CellWidth / 2)
-			// 	py += float64(grid.CellWidth / 2)
-
-			// 	direction := vector.Vector{px - bodyPosition[0], py - bodyPosition[1]}.Unit()
-
-			// 	rotations := []float64{
-			// 		math.Pi / 2,
-			// 		-math.Pi / 2,
-			// 	}
-
-			// 	freePotential := true
-
-			// 	for _, rotation := range rotations {
-
-			// 		bp := vector.Vector{bodyPosition[0], bodyPosition[1]}
-			// 		offset := vector.Rotate(direction, rotation).Scale(float64(grid.CellWidth / 3))
-			// 		ep := vector.Vector{px, py}
-			// 		bp.Add(offset)
-			// 		ep.Add(offset)
-
-			// 		ai.RayTest.X = int32(bp[0])
-			// 		ai.RayTest.Y = int32(bp[1])
-			// 		ai.RayTest.X2 = int32(ep[0])
-			// 		ai.RayTest.Y2 = int32(ep[1])
-
-			// 		// DEBUG
-			// 		if ai.GameObject.Level.Game.DebugMode {
-			// 			for _, cell := range ai.Path.Cells {
-			// 				cx := float64(cell.X * 16)
-			// 				cy := float64(cell.Y * 16)
-			// 				ebitenutil.DrawRect(screen, cx-ai.GameObject.Level.CameraOffsetX, cy-ai.GameObject.Level.CameraOffsetY, 16, 16, color.RGBA{0, 255, 0, 192})
-			// 			}
-			// 			ebitenutil.DrawLine(
-			// 				screen,
-			// 				float64(ai.RayTest.X)-ai.GameObject.Level.CameraOffsetX,
-			// 				float64(ai.RayTest.Y)-ai.GameObject.Level.CameraOffsetY,
-			// 				float64(ai.RayTest.X2)-ai.GameObject.Level.CameraOffsetX,
-			// 				float64(ai.RayTest.Y2)-ai.GameObject.Level.CameraOffsetY,
-			// 				color.White)
-			// 		}
-
-			// 		if solids.IsColliding(ai.RayTest) {
-			// 			cancelPotential = true
-			// 			freePotential = false
-			// 			break
-			// 		}
-
-			// 	}
-
-			// 	if freePotential {
-			// 		targetCell = potential
-			// 	}
-
-			// 	if cancelPotential {
-			// 		break
-			// 	}
-
-			// }
 
 			if targetCell != nil {
 
@@ -494,24 +473,54 @@ func (ai *AIControlComponent) Update(screen *ebiten.Image) {
 				dy := nextY - bodyPosition[1]
 
 				dv := vector.Vector{float64(dx), float64(dy)}
-				if dv.Magnitude() <= 4 {
-					if ai.Path.AtEnd() {
-						ai.Path = nil
-					} else {
-						ai.Path.SetIndex(ai.Path.Index(targetCell) + 1)
-						// ai.Path.Advance()
+
+				if dv.Magnitude() <= 4 && !ai.Path.AtEnd() {
+
+					potential := ai.Path.Get(ai.Path.CurrentIndex + 3)
+
+					if potential != nil {
+
+						grid := ai.GameObject.Level.PathfindingGrid
+
+						px, py := grid.GridToWorld(potential.X, potential.Y)
+						px += float64(grid.CellWidth / 2)
+						py += float64(grid.CellHeight / 2)
+
+						diff := vector.Vector{px - bodyPosition[0], py - bodyPosition[1]}
+
+						diff.Scale(0.5)
+
+						tx := bodyPosition[0] + diff[0]
+						ty := bodyPosition[1] + diff[1]
+
+						tcx, tcy := body.Object.Space.WorldToSpace(tx, ty)
+
+						if midPoint := body.Object.Space.Cell(tcx, tcy); midPoint != nil && !midPoint.ContainsTags("solid") {
+							ai.Path.SetIndex(ai.Path.Index(potential))
+						}
+
 					}
+
 				}
 
 				friction := 0.25
 				maxSpeed := 2.0
 				accel := 0.25 + friction
 
-				if body.Speed.Magnitude() > friction {
-					m := body.Speed.Magnitude()
-					body.Speed.Unit().Scale(m - friction)
+				if body.Speed[0] > friction {
+					body.Speed[0] -= friction
+				} else if body.Speed[0] < -friction {
+					body.Speed[0] += friction
 				} else {
-					body.Speed = vector.Vector{0, 0}
+					body.Speed[0] = 0
+				}
+
+				if body.Speed[1] > friction {
+					body.Speed[1] -= friction
+				} else if body.Speed[1] < -friction {
+					body.Speed[1] += friction
+				} else {
+					body.Speed[1] = 0
 				}
 
 				body.Speed.Add(dv.Unit().Scale(accel))
@@ -520,22 +529,92 @@ func (ai *AIControlComponent) Update(screen *ebiten.Image) {
 					body.Speed.Unit().Scale(maxSpeed)
 				}
 
+				ai.Facing = body.Speed.Clone().Unit()
+
+			} else {
+				ai.RecalculatePath()
 			}
 
 		} else {
+			ai.RecalculatePath()
+		}
 
-			// GENERATE PATH
+		if a := ai.GameObject.GetComponent(TypeAnimationComponent); a != nil {
+			anim := a.(*AnimationComponent)
 
-			target := ai.GameObject.Level.GetGameObjectByComponent(TypePlayerControlComponent)
+			xc := 0
+			yc := 0
 
-			if len(target) > 0 {
-				targetBody := target[0].Get(TypeBodyComponent).(*BodyComponent)
-				ai.TargetPos = targetBody.Center()
+			min := 0.3
+
+			if math.Abs(body.Speed[0]) > min {
+				xc = 1
 			}
 
-			ai.Path = grid.GetPath(bodyPosition[0], bodyPosition[1], ai.TargetPos[0], ai.TargetPos[1], false)
+			if body.Speed[1] < -min {
+				yc = -1
+			} else if body.Speed[1] > min {
+				yc = 1
+			}
+
+			if yc < 0 && xc != 0 {
+				anim.Ase.Play("ur")
+			} else if yc < 0 && xc == 0 {
+				anim.Ase.Play("u")
+			} else if yc == 0 && xc != 0 {
+				anim.Ase.Play("r")
+			} else if yc > 0 && xc != 0 {
+				anim.Ase.Play("dr")
+			} else if yc > 0 && xc == 0 {
+				anim.Ase.Play("d")
+			}
+
+			if body.Speed.Magnitude() == 0 {
+				anim.Ase.PlaySpeed = 0
+				if anim.Ase.CurrentAnimation != nil {
+					anim.Ase.CurrentFrame = anim.Ase.CurrentAnimation.Start
+				}
+			} else {
+				anim.Ase.PlaySpeed = 1
+			}
+
+			d := ai.GameObject.GetComponent(TypeDrawComponent)
+
+			if d != nil {
+
+				DrawComponent := d.(*DrawComponent)
+
+				if ai.Facing[0] < 0 {
+					DrawComponent.FlipHorizontal = true
+				} else if ai.Facing[0] > 0 {
+					DrawComponent.FlipHorizontal = false
+				}
+
+			}
 
 		}
+
+	}
+
+}
+
+func (ai *AIControlComponent) RecalculatePath() {
+
+	if b := ai.GameObject.GetComponent(TypeBodyComponent); b != nil {
+
+		body := b.(*BodyComponent)
+		bodyCenterX, bodyCenterY := body.Object.Center()
+		bodyPosition := vector.Vector{bodyCenterX, bodyCenterY}
+		grid := ai.GameObject.Level.PathfindingGrid
+
+		target := ai.GameObject.Level.GetGameObjectByComponent(TypePlayerControlComponent)
+
+		if len(target) > 0 {
+			targetBody := target[0].GetComponent(TypeBodyComponent).(*BodyComponent)
+			ai.TargetPos = targetBody.Center()
+		}
+
+		ai.Path = grid.GetPath(bodyPosition[0], bodyPosition[1], ai.TargetPos[0], ai.TargetPos[1], false)
 
 	}
 
@@ -562,7 +641,7 @@ func (ds *DepthSortComponent) OnRemove(g *GameObject) {}
 func (ds *DepthSortComponent) Update(screen *ebiten.Image) {
 
 	if ds.YSort {
-		if b := ds.GameObject.Get(TypeBodyComponent); b != nil {
+		if b := ds.GameObject.GetComponent(TypeBodyComponent); b != nil {
 			body := b.(*BodyComponent)
 			ds.Depth = body.Center()[1]
 		}
@@ -571,3 +650,68 @@ func (ds *DepthSortComponent) Update(screen *ebiten.Image) {
 }
 
 func (ds *DepthSortComponent) Type() int { return TypeDepthSortComponent }
+
+type WeaponComponent struct {
+	GameObject    *GameObject
+	Cooldown      int
+	Projectile    string
+	FireDirection vector.Vector
+	SpawnOffset   vector.Vector
+}
+
+func NewWeaponComponent() *WeaponComponent {
+	return &WeaponComponent{}
+}
+
+func (wp *WeaponComponent) OnAdd(g *GameObject) {
+	wp.GameObject = g
+}
+
+func (wp *WeaponComponent) OnRemove(g *GameObject) {}
+
+func (wp *WeaponComponent) Update(screen *ebiten.Image) {}
+
+func (wp *WeaponComponent) Fire() {
+
+	x, y := 0.0, 0.0
+
+	if bp := wp.GameObject.GetComponent(TypeBodyComponent); bp != nil {
+		goBody := bp.(*BodyComponent)
+		x, y = goBody.Object.X, goBody.Object.Y
+	}
+
+	bullet := NewBullet(wp.GameObject.Level, x, y, wp.FireDirection)
+	wp.GameObject.Level.Add(bullet)
+
+}
+
+func (wp *WeaponComponent) Type() int { return TypeWeaponComponent }
+
+//
+
+// type EndOnCollisionComponent struct {
+// 	GameObject *GameObject
+// }
+
+// func NewEndOnCollisionComponent() *EndOnCollisionComponent {
+// 	return &EndOnCollisionComponent{}
+// }
+
+// func (eoc *EndOnCollisionComponent) OnAdd(g *GameObject) {
+// 	eoc.GameObject = g
+// }
+
+// func (eoc *EndOnCollisionComponent) OnRemove(g *GameObject) {}
+
+// func (eoc *EndOnCollisionComponent) Update(screen *ebiten.Image) {
+
+// 	if b := eoc.GameObject.GetComponent(TypeBodyComponent); b != nil {
+// 		body := b.(*BodyComponent)
+// 		if body.LastCollision != nil {
+// 			eoc.GameObject.Level.Remove(eoc.GameObject)
+// 		}
+// 	}
+
+// }
+
+// func (eoc *EndOnCollisionComponent) Type() int { return TypeEndOnCollisionComponent }

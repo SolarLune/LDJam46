@@ -1,6 +1,8 @@
 package main
 
-import "github.com/hajimehoshi/ebiten"
+import (
+	"github.com/hajimehoshi/ebiten"
+)
 
 type GameObject struct {
 	Level      *Level
@@ -39,30 +41,34 @@ func (g *GameObject) Update(screen *ebiten.Image) {
 
 }
 
-func (g *GameObject) Add(components ...Component) {
+func (g *GameObject) AddComponent(components ...Component) {
+
 	for _, component := range components {
 		component.OnAdd(g)
 		g.Components = append(g.Components, component)
 	}
+
 }
 
-func (g *GameObject) Remove(components ...Component) {
+func (g *GameObject) RemoveComponent(components ...Component) {
 
 	for _, component := range components {
 
 		for i, c := range g.Components {
+
 			if c == component {
 				component.OnRemove(g)
 				g.Components = append(g.Components[:i], g.Components[i+1:]...)
 				break
 			}
+
 		}
 
 	}
 
 }
 
-func (g *GameObject) Get(componentTypeConstant int) Component {
+func (g *GameObject) GetComponent(componentTypeConstant int) Component {
 
 	for _, c := range g.Components {
 		if c.Type() == componentTypeConstant {
@@ -74,9 +80,17 @@ func (g *GameObject) Get(componentTypeConstant int) Component {
 
 }
 
-func (g *GameObject) Clear() {
+func (g *GameObject) ClearComponents() {
 	for _, c := range g.Components {
 		c.OnRemove(g)
 	}
 	g.Components = []Component{}
+}
+
+func (g *GameObject) OnRemove() {
+
+	for _, comp := range g.Components {
+		comp.OnRemove(g)
+	}
+
 }
