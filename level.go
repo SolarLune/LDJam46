@@ -328,7 +328,7 @@ func (level *Level) Remove(g *GameObject) {
 	level.ToRemove = append(level.ToRemove, g)
 }
 
-func (level *Level) GetGameObjectByComponent(componentTypeConstant int) []*GameObject {
+func (level *Level) GetGameObjectByComponent(componentTypeConstant string) []*GameObject {
 
 	goList := []*GameObject{}
 

@@ -4,6 +4,13 @@ import (
 	"github.com/hajimehoshi/ebiten"
 )
 
+type Component interface {
+	OnAdd(*GameObject)
+	OnRemove(*GameObject)
+	Update(*ebiten.Image)
+	Type() string
+}
+
 type GameObject struct {
 	Level      *Level
 	Components []Component
@@ -68,7 +75,7 @@ func (g *GameObject) RemoveComponent(components ...Component) {
 
 }
 
-func (g *GameObject) GetComponent(componentTypeConstant int) Component {
+func (g *GameObject) GetComponent(componentTypeConstant string) Component {
 
 	for _, c := range g.Components {
 		if c.Type() == componentTypeConstant {
